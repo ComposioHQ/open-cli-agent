@@ -1,0 +1,22 @@
+[project]
+name = "composio-cli-agent"
+version = "0.1.0"
+description = "A general-purpose CLI agent for Composio with authentication management and LangChain integration"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "composio==0.8.19",
+    "composio-langchain==0.8.19",
+    "langchain",
+    "langchain-openai",
+    "langchain-mcp-adapters",
+    "langgraph",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "prompt-toolkit>=3.0.0",
+]
+
+[project.scripts]
+composio-cli = "composio_cli_agent.main:main"
