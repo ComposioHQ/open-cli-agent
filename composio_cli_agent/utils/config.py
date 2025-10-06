@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import json
 
 # Configuration constants
-DEFAULT_MODEL = "gpt-5"
+DEFAULT_MODEL = "gpt-4.1"
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_USER_ID = "default"
 CONFIG_DIR_NAME = ".composio-cli"

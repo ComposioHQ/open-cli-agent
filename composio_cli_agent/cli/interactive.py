@@ -4,15 +4,20 @@ import asyncio
 from typing import Optional, List, Tuple
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.text import Text
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import HTML
+import sys
 
 from ..utils.config import config
 from ..agent.composio_agent import create_tool_router_agent, AgentConfig
 from ..utils.banner import print_banner
 
-console = Console()
+# Disable buffering for immediate output, disable auto-highlighting
+console = Console(force_terminal=True, force_interactive=True, highlight=False)
 
 
 class InteractiveSession:
@@ -37,11 +42,8 @@ class InteractiveSession:
     def show_welcome_banner(self) -> None:
         """Display welcome banner and tips"""
         print_banner()
-        
-        console.print("\n[bold cyan]Tips for getting started:[/bold cyan]\n")
-        console.print("  1. Type your question or task naturally")
-        console.print("  2. Use the agent with access to 500+ tools via Composio")
-        console.print("  3. Type [bold]?[/bold] for shortcuts or [bold]/exit[/bold] to quit\n")
+        console.print()
+        console.print("[dim]Access to 500+ tools • Type ? for help • /exit to quit[/dim]")
         
     def get_effective_user_id(self) -> str:
         """Determine the effective user ID to use"""
@@ -72,7 +74,6 @@ class InteractiveSession:
     async def initialize_agent(self, composio_key: str, openai_key: str) -> bool:
         """Initialize the agent and session"""
         effective_user_id = self.get_effective_user_id()
-        console.print(f"[dim]User ID: {effective_user_id}[/dim]")
         
         try:
             agent_config = AgentConfig(
@@ -83,7 +84,6 @@ class InteractiveSession:
             
             with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
                 # Create agent
-                progress.add_task("Creating agent...", total=None)
                 self.agent = create_tool_router_agent(
                     composio_api_key=composio_key,
                     openai_api_key=openai_key,
@@ -102,7 +102,7 @@ class InteractiveSession:
             self.agent.create_session(toolkits_config)
             await self.agent.setup_graph_async()
             
-            console.print(f"[green]✓[/green] Agent ready!\n")
+            console.print(f"[green]✓[/green] Agent ready!")
             return True
             
         except Exception as e:
@@ -111,7 +111,9 @@ class InteractiveSession:
     
     def show_help(self) -> None:
         """Display available shortcuts"""
-        console.print("\n[bold cyan]Available shortcuts:[/bold cyan]")
+        console.print()
+        console.print()
+        console.print("[bold cyan]Available shortcuts:[/bold cyan]")
         console.print("  [bold]?[/bold]         - Show this help")
         console.print("  [bold]/exit[/bold]     - Exit interactive mode")
         console.print("  [bold]/clear[/bold]    - Clear conversation history")
@@ -121,17 +123,26 @@ class InteractiveSession:
     def clear_history(self) -> None:
         """Clear conversation history"""
         self.conversation_history = []
-        console.print("\n[dim]Conversation history cleared.[/dim]\n")
+        if self.agent:
+            self.agent.clear_conversation_history()
+        console.print()
+        console.print()
+        console.print("[dim]Conversation history cleared.[/dim]")
+        console.print()
     
     def show_history(self) -> None:
         """Display conversation history"""
+        console.print()
+        console.print()
         if not self.conversation_history:
-            console.print("\n[dim]No conversation history yet.[/dim]\n")
+            console.print("[dim]No conversation history yet.[/dim]")
         else:
-            console.print("\n[bold cyan]Conversation History:[/bold cyan]\n")
+            console.print("[bold cyan]Conversation History:[/bold cyan]")
+            console.print()
             for role, msg in self.conversation_history:
                 prefix = ">" if role == "user" else "●"
-                console.print(f"{prefix} {msg}\n")
+                console.print(f"{prefix} {msg}")
+        console.print()
     
     def handle_command(self, user_input: str) -> bool:
         """Handle special commands. Returns True if should continue loop."""
@@ -140,7 +151,10 @@ class InteractiveSession:
             return True
         
         if user_input in ["/exit", "/quit", "exit", "quit"]:
-            console.print("\n[dim]👋 Goodbye![/dim]\n")
+            console.print()
+            console.print()
+            console.print("[dim]👋 Goodbye![/dim]")
+            console.print()
             return False
         
         if user_input == "/clear":
@@ -154,24 +168,92 @@ class InteractiveSession:
         return True
     
     async def process_user_input(self, user_input: str) -> None:
-        """Process user input and get agent response"""
+        """Process user input and stream agent response with tool calls"""
         # Add to history
         self.conversation_history.append(("user", user_input))
         
-        # Get response from agent
-        console.print("\n[bold white]●[/bold white] ", end="")
-        try:
-            response = await self.agent.run_async(user_input)
-            console.print(response)
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
-            response = f"Error: {e}"
+        console.print()
         
-        self.conversation_history.append(("agent", response))
+        full_response = ""
+        ai_message = ""
+        first_chunk = True
+        live = None
+        active_tools = set()
+        
+        try:
+            # Start with spinner
+            spinner = Spinner("dots", text="", style="cyan")
+            live = Live(spinner, console=console, refresh_per_second=20, transient=True)
+            live.start()
+            
+            async for event in self.agent.run_async_stream(user_input):
+                event_type = event.get("type")
+                
+                if event_type == "ai_chunk":
+                    # Stream AI text as it comes
+                    if first_chunk:
+                        if live and live.is_started:
+                            live.stop()
+                        console.print("● ", end="", style="bold cyan")
+                        first_chunk = False
+                    
+                    chunk = event.get("content", "")
+                    console.print(chunk, end="")
+                    ai_message += chunk
+                
+                elif event_type == "tool_call_start":
+                    # Compact tool notification
+                    tool_name = event.get("tool_name", "unknown")
+                    active_tools.add(tool_name)
+                    
+                    if not first_chunk and ai_message:
+                        console.print()
+                    elif first_chunk:
+                        if live and live.is_started:
+                            live.stop()
+                        first_chunk = False
+                    
+                    console.print(f"  [dim]🔧 {tool_name}...[/dim]", end="")
+                
+                elif event_type == "tool_call_end":
+                    tool_name = event.get("tool_name", "unknown")
+                    if tool_name in active_tools:
+                        console.print(f" [dim green]✓[/dim green]")
+                        active_tools.remove(tool_name)
+                
+                elif event_type == "error":
+                    if live and live.is_started:
+                        live.stop()
+                    error_msg = event.get("content", "Unknown error")
+                    console.print()
+                    console.print(f"[red]✗ {error_msg}[/red]")
+                    full_response = f"Error: {error_msg}"
+                
+        except Exception as e:
+            if live and live.is_started:
+                live.stop()
+            console.print()
+            console.print(f"[red]✗ {e}[/red]")
+            full_response = f"Error: {e}"
+        finally:
+            if live and live.is_started:
+                live.stop()
+        
+        # Save response to history
+        if not full_response:
+            full_response = ai_message
+        
+        self.conversation_history.append(("agent", full_response))
+        # Add spacing after response
+        console.print()
         console.print()
     
     async def run_main_loop(self) -> None:
         """Run the main interaction loop"""
+        console.print()
+        console.print("[dim]Type your message or ? for help[/dim]")
+        console.print()
+        
         while True:
             try:
                 # Show prompt and get input with autocomplete
@@ -196,13 +278,17 @@ class InteractiveSession:
                 await self.process_user_input(user_input)
                 
             except (KeyboardInterrupt, EOFError):
-                console.print("\n\n[dim]👋 Goodbye![/dim]\n")
+                console.print()
+                console.print()
+                console.print("[dim]👋 Goodbye![/dim]")
+                console.print()
                 break
             except Exception as e:
-                console.print(f"\n[red]Unexpected error: {e}[/red]\n")
+                console.print()
+                console.print()
+                console.print(f"[red]Unexpected error: {e}[/red]")
+                console.print()
                 continue
-        
-        console.print("[dim]? for shortcuts[/dim]\n")
 
 
 async def run_interactive_mode(toolkits: Optional[str] = None, auth_configs: Optional[str] = None,
